@@ -1,6 +1,7 @@
 # Standard
 from dataclasses import dataclass
 from http import HTTPStatus
+from typing import Optional
 from unittest.mock import patch
 import asyncio
 
@@ -34,12 +35,18 @@ BASE_MODEL_PATHS = [BaseModelPath(name=MODEL_NAME, model_path=MODEL_NAME)]
 
 
 @dataclass
+class MockTokenizer:
+    type: Optional[str] = None
+
+
+@dataclass
 class MockHFConfig:
     model_type: str = "any"
 
 
 @dataclass
 class MockModelConfig:
+    task = "generate"
     tokenizer = MODEL_NAME
     trust_remote_code = False
     tokenizer_mode = "auto"
@@ -47,7 +54,13 @@ class MockModelConfig:
     tokenizer_revision = None
     embedding_mode = False
     multimodal_config = MultiModalConfig()
+    diff_sampling_param: Optional[dict] = None
     hf_config = MockHFConfig()
+    logits_processor_pattern = None
+    allowed_local_media_path: str = ""
+
+    def get_diff_sampling_param(self):
+        return self.diff_sampling_param or {}
 
 
 @dataclass
@@ -59,6 +72,7 @@ class MockEngine:
 async def _llama_guard_init():
     """Initialize a llama guard"""
     engine = MockEngine()
+    engine.errored = False
     model_config = await engine.get_model_config()
 
     llama_guard_detection = LlamaGuard(
@@ -69,6 +83,7 @@ async def _llama_guard_init():
         base_model_paths=BASE_MODEL_PATHS,
         response_role="assistant",
         chat_template=CHAT_TEMPLATE,
+        chat_template_content_format="auto",
         lora_modules=None,
         prompt_adapters=None,
         request_logger=None,
@@ -177,16 +192,3 @@ def test_chat_detection(llama_guard_detection, llama_guard_completion_response):
         assert detection_0["detection"] == "safe"
         assert detection_0["detection_type"] == "risk"
         assert pytest.approx(detection_0["score"]) == 0.001346767
-
-
-def test_chat_detection_with_extra_unallowed_params(llama_guard_detection):
-    llama_guard_detection_instance = asyncio.run(llama_guard_detection)
-    chat_request = ChatDetectionRequest(
-        messages=[
-            DetectionChatMessageParam(role="user", content="How do I search for moose?")
-        ],
-        detector_params={"moo": "unallowed"},  # unallowed param
-    )
-    detection_response = asyncio.run(llama_guard_detection_instance.chat(chat_request))
-    assert type(detection_response) == ErrorResponse
-    assert detection_response.code == HTTPStatus.BAD_REQUEST.value

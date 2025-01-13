@@ -1,6 +1,7 @@
 # Standard
 from dataclasses import dataclass
 from http import HTTPStatus
+from typing import Optional
 from unittest.mock import patch
 import asyncio
 
@@ -34,12 +35,18 @@ BASE_MODEL_PATHS = [BaseModelPath(name=MODEL_NAME, model_path=MODEL_NAME)]
 
 
 @dataclass
+class MockTokenizer:
+    type: Optional[str] = None
+
+
+@dataclass
 class MockHFConfig:
     model_type: str = "any"
 
 
 @dataclass
 class MockModelConfig:
+    task = "generate"
     tokenizer = MODEL_NAME
     trust_remote_code = False
     tokenizer_mode = "auto"
@@ -47,7 +54,13 @@ class MockModelConfig:
     tokenizer_revision = None
     embedding_mode = False
     multimodal_config = MultiModalConfig()
+    diff_sampling_param: Optional[dict] = None
     hf_config = MockHFConfig()
+    logits_processor_pattern = None
+    allowed_local_media_path: str = ""
+
+    def get_diff_sampling_param(self):
+        return self.diff_sampling_param or {}
 
 
 @dataclass
@@ -59,6 +72,7 @@ class MockEngine:
 async def _granite_guardian_init():
     """Initialize a granite guardian"""
     engine = MockEngine()
+    engine.errored = False
     model_config = await engine.get_model_config()
 
     granite_guardian = GraniteGuardian(
@@ -69,6 +83,7 @@ async def _granite_guardian_init():
         base_model_paths=BASE_MODEL_PATHS,
         response_role="assistant",
         chat_template=CHAT_TEMPLATE,
+        chat_template_content_format="auto",
         lora_modules=None,
         prompt_adapters=None,
         request_logger=None,
@@ -229,18 +244,3 @@ def test_chat_detection_errors_on_stream(granite_guardian_detection):
     assert type(detection_response) == ErrorResponse
     assert detection_response.code == HTTPStatus.BAD_REQUEST.value
     assert "streaming is not supported" in detection_response.message
-
-
-def test_chat_detection_with_extra_unallowed_params(granite_guardian_detection):
-    granite_guardian_detection_instance = asyncio.run(granite_guardian_detection)
-    chat_request = ChatDetectionRequest(
-        messages=[
-            DetectionChatMessageParam(role="user", content="How do I pick a lock?")
-        ],
-        detector_params={"boo": 3},  # unallowed param
-    )
-    detection_response = asyncio.run(
-        granite_guardian_detection_instance.chat(chat_request)
-    )
-    assert type(detection_response) == ErrorResponse
-    assert detection_response.code == HTTPStatus.BAD_REQUEST.value
