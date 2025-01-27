@@ -1,5 +1,6 @@
 # Standard
 from argparse import Namespace
+import inspect
 import signal
 import socket
 
@@ -16,7 +17,7 @@ from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai import api_server
 from vllm.entrypoints.openai.cli_args import make_arg_parser
 from vllm.entrypoints.openai.protocol import ErrorResponse
-from vllm.entrypoints.openai.serving_engine import BaseModelPath
+from vllm.entrypoints.openai.serving_models import BaseModelPath, OpenAIServingModels
 from vllm.utils import FlexibleArgumentParser
 from vllm.version import __version__ as VLLM_VERSION
 import uvloop
@@ -41,7 +42,7 @@ def chat_detection(
     return request.app.state.detectors_serving_chat_detection
 
 
-def init_app_state_with_detectors(
+async def init_app_state_with_detectors(
     engine_client: EngineClient,
     model_config: ModelConfig,
     state: State,
@@ -63,17 +64,22 @@ def init_app_state_with_detectors(
     ]
 
     resolved_chat_template = load_chat_template(args.chat_template)
-    # Post-0.6.6 incoming change for vllm - ref. https://github.com/vllm-project/vllm/pull/11660
-    # Will be included after an official release includes this refactor
-    # state.openai_serving_models = OpenAIServingModels(
-    #     model_config=model_config,
-    #     base_model_paths=base_model_paths,
-    #     lora_modules=args.lora_modules,
-    #     prompt_adapters=args.prompt_adapters,
-    # )
+    state.openai_serving_models = OpenAIServingModels(
+        engine_client=engine_client,
+        model_config=model_config,
+        base_model_paths=base_model_paths,
+        lora_modules=args.lora_modules,
+        prompt_adapters=args.prompt_adapters,
+    )
 
     # Use vllm app state init
-    api_server.init_app_state(engine_client, model_config, state, args)
+    # init_app_state became async in https://github.com/vllm-project/vllm/pull/11727
+    # ref. https://github.com/opendatahub-io/vllm-tgis-adapter/pull/207
+    maybe_coroutine = api_server.init_app_state(
+        engine_client, model_config, state, args
+    )
+    if inspect.isawaitable(maybe_coroutine):
+        await maybe_coroutine
 
     generative_detector_class = generative_detectors.MODEL_CLASS_MAP[args.model_type]
 
@@ -83,11 +89,8 @@ def init_app_state_with_detectors(
         args.output_template,
         engine_client,
         model_config,
-        base_model_paths,  # Not present in post-0.6.6 incoming change
-        # state.openai_serving_models, # Post-0.6.6 incoming change
+        state.openai_serving_models,
         args.response_role,
-        lora_modules=args.lora_modules,  # Not present in post-0.6.6 incoming change
-        prompt_adapters=args.prompt_adapters,  # Not present in post-0.6.6 incoming change
         request_logger=request_logger,
         chat_template=resolved_chat_template,
         chat_template_content_format=args.chat_template_content_format,
@@ -118,7 +121,9 @@ async def run_server(args, **uvicorn_kwargs) -> None:
         app = api_server.build_app(args)
 
         model_config = await engine_client.get_model_config()
-        init_app_state_with_detectors(engine_client, model_config, app.state, args)
+        await init_app_state_with_detectors(
+            engine_client, model_config, app.state, args
+        )
 
         temp_socket.close()
 
